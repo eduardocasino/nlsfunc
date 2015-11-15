@@ -1,5 +1,5 @@
 ; FreeDOS NLSFUNC
-; Copyright (c) 2004 Eduardo Casino <casino_e@terra.es>
+; Copyright (c) 2004,2005 Eduardo Casino <casino_e@terra.es>
 ;
 ; This program is free software; you can redistribute it and/or modify
 ; it under the terms of the GNU General Public License as published by
@@ -19,15 +19,19 @@
 ;       by Ralf Brown. Rbkeyswp is in the public domain, many thanks
 ;       to Ralf!
 ;
+; NOTE2: I've included quotes from Ralf Brown Interrupt List into the
+;        comments to ease understanding of the code.
+;        
 ; 04-12-05  Eduardo Casino   First version
 ; 05-01-12  Eduardo Casino   Fix bug in command line parsing. Kernel
 ;                            compatibility checks.
+; 05-11-18  Eduardo Casino   IOCTL support
 ;
 ; TODOS: * Fallback mechanisms
 ;        * Check that AX == CX for disk reads
 ;        * Check if a package is already loaded
-;        * Use ioctls to notify all the affected drivers (when DISPLAY.SYS is
-;          ready)
+;        * Better memory handling
+;        * Localization
 ;
 
 ; Version 2 uses words instead of bytes for Yes and No characters
@@ -79,8 +83,8 @@ NLS_MAX_PKGSIZE		equ	1009
 		SECTION .text
 
 ; We are using the original PSP as read buffer. However, the maximum size we
-; we need is 258 (256 bytes plus (word) length), so we add this extra word
-; right after the PSP
+; need is 258 (256 bytes plus (word) length), so we add this extra word right
+; after the PSP
 ; 
 readbuf_ext	dw	0
 ;
@@ -115,6 +119,10 @@ table_start	dw	0
 country_info	dw	0
 tmp_buf		dd	0
 
+
+; Pointer to Kernel NLS info
+;
+kernel_nls	dd	0
 
 ; Pointers to hardcoded tables
 ;
@@ -161,7 +169,7 @@ NLS_FREEDOS_NLSFUNC_ID		equ	0x534b	; FreeDOS NLSFUNC magic #
 chain:		db	0xEA			; jmp far
 old_int2f	dw	0,0
 
-int2f:		cmp	ah, 0x14
+int2f:		cmp	ah, 0x14		; New Int 2Fh entry point
 		jne	chain
 
 i2f14:		cmp	al, 0x00
@@ -231,30 +239,293 @@ i2f1400:	cmp	bx, NLS_FREEDOS_NLSFUNC_VERSION
 ;
 ; It calls the internals of MUX-14-03 and then informs the drivers of the
 ; code page change
+;   FIXME: (Check return codes)
 ;
-i2f1401:	
-		call	load_nls_info
+i2f1401:	call	load_nls_info
 		jc	.ret
 
-		mov	bx, [cs:codepage]
 		call	nls_set_cp
-		jnc	.clear
-		mov	ax, DE_FILENOTFND
-		jmp	.ret
-.clear:		xor	ax, ax
-.ret:		jmp	i2f14_ret
+.ret:		jmp	i2f14_ret	; AX holds return code
 
-nls_set_cp:	; Right now, notify DISPLAY only, using its MUX-AD interface
-		;
-		mov	ax, 0xAD01		; SET ACTIVE CODE PAGE
+nls_set_cp:	push	es
+		push	di
+		push	ds
+		push	si
+		push	dx
+		push	cx
+		push	bx
+
+		mov 	word [cs:result], 0
+
+
+		mov	ax, 0xAD00		; DISPLAY: INSTALLATION CHECK
 		int	0x2F
-		jnc	.inst?
-		ret
-.inst?:		cmp	ax, 0xAD01
-		je	.cret			; DISPLAY not installed
-		clc
-		ret
-.cret:		stc
+		cmp	al, 0xFF
+		jc	.disperr		; NO DISPLAY
+
+		; DISPLAY version < 1.00, notify using its MUX-AD interface
+		;
+		cmp	bx, 0x0100
+		jnc	.ioctl
+
+		mov	ax, 0xAD01		; SET ACTIVE CODE PAGE
+		mov	bx, [cs:codepage]
+		int	0x2F
+		jnc	.ioctl
+
+; 41h (65)  network: Access denied
+;          (DOS 3.0+ [maybe 3.3+???]) codepage switching not possible
+;
+.disperr:	mov	word [cs:result], 0x41
+
+
+		; Change code page using the IOCTL interface
+		;
+		; We're using read_buf in the following way
+		;
+		; Offset  Length    Description
+		; 00h  9  BYTEs     ASCIZ Device name (Max len == 8 plus NULL
+		; 10h               Datablock for IOCTL
+		;  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+		; 10h    WORD    length of data
+		; 12h    WORD    code page ID (see #01757 at INT 21/AX=6602h)
+		; 14h 2N BYTEs   DCBS (double byte charset) lead byte range
+		;                  start/end for each of N ranges (DOS 4.0)
+		;        WORD    0000h  end of data (DOS 4.0)
+		;
+.ioctl:		les	di, [cs:read_buf]
+		add	di, 0x10
+
+		mov	ax, [cs:codepage]
+		mov	[es:di+2], ax
+
+		; Locate the DBCS table
+		;
+		lds	si, [cs:kern_buf]
+		lds	si, [si+8]		; nlsPackage
+		mov	cx, [si+14]		; Number of subfunctions
+		add	si, 16			; Begin pointers
+.find_sf7:	cmp	byte [si], 7
+		je	.sf7_found
+		add	si, 5
+		loop	.find_sf7
+
+		; Not found. It should never reach here. Anyway,
+		; put an empty DBCS table and go on.
+		;
+		mov	word [es:di], 2		; Length of codepage
+		jmp	.getchain
+
+.sf7_found:	lds	si, [si+1]		; Pointer to DBCS table
+		mov	cx, [si]		; Length of DBCS table
+		mov	[es:di], cx
+		add	word [es:di], 2		; Length of codepage
+		add	di, 4
+		add	si, 2
+		cld				; Copy table
+		rep	movsb
+
+.getchain:	mov	ax, 0x122C	; GET DEVICE CHAIN
+		int	0x2F		; BX:AX
+		mov	es, bx
+		mov	di, ax
+
+		; Format of DOS device driver header:
+		; Offset  Size    Description     (Table 01646)
+		;  00h    DWORD   pointer to next drv, offset=FFFFh if last drv
+		;  04h    WORD    device attributes (see #01647,#01648)
+		;  06h    WORD    device strategy entry point
+		;                 call with ES:BX -> request header
+		;                 (see #02597 at INT 2F/AX=0802h)
+		;  08h    WORD    device interrupt entry point
+		;  ---character device---
+		;  0Ah  8 BYTEs   blank-padded character device name
+		;
+		; Bitfields for device attributes (character device):
+		; Bit(s)  Description     (Table 01647)
+		;  15     set (indicates character device)
+		;  14     IOCTL supported (see AH=44h)
+		;  13     (DOS 3.0+) output until busy supported
+		;  12     reserved
+		;  11     (DOS 3.0+) OPEN/CLOSE/RemMedia calls supported
+		;  10-8   reserved
+		;  7      (DOS 5.0+) Generic IOCTL check call supported
+		;            (driver command 19h)
+		;         (see AX=4410h,AX=4411h)
+		;  6      (DOS 3.2+) Generic IOCTL call supported (driver
+		;            command 13h)
+		;         (see AX=440Ch,AX=440Dh"DOS 3.2+")
+		;  5      reserved
+		;  4      device is special (use INT 29 "fast console output")
+		;  3      device is CLOCK$
+		;  2      device is NUL
+		;  1      device is standard output
+		;  0      device is standard input
+
+
+.chkchar:	mov	ax, [es:di+4]		; Device atributes
+		test	ah, 0x80		; Character device?
+		jz	.jmpnext
+		test	al, 0x40		; Generic IOCTL?
+		jnz	.chkbusy
+.jmpnext:	jmp	.nextdev
+
+		;  INT 2F - DOS 3.3+ PRINT - GET PRINTER DEVICE
+		;          AX = 0106h
+		;  Return: CF set if files in print queue
+		;              AX = error code 0008h (queue full)
+		;              DS:SI -> device driver header (see #01646)
+		;          CF clear if print queue empty
+		;              AX = 0000h
+		;  Desc:  determine which device, if any, PRINT is currently
+		;         using for output
+		;  Notes: undocumented prior to the release of MS-DOS 5.0
+		;         this function can be used to allow a program to avoid
+		;         printing to the printer on which PRINT is currently
+		;         performing output
+
+		; Check if busy
+		;
+.chkbusy:	mov	ax, 0x0106		; Get printer device
+		clc				; Clear carry in case PRINT is
+		push	ds			; not installed, 
+		push	si
+		int	0x2F
+
+		jnc	.notbusy		; Print queue empty
+						; (or 0x0106 not implemented)
+
+		; Check if we are trying to write to the busy device
+		; ES:DI == DS:SI ??
+		;
+		; DS:SI device header
+		;
+		cmp	di, si
+		jne	.notbusy
+
+		mov	ax, ds
+		mov	bx, es
+		cmp	ax, bx
+		jne	.notbusy
+
+		mov	word [cs:result], 0x41
+		pop	si
+		pop	ds
+		jmp	.nextdev
+
+.notbusy:	; Get device name from [es:di+10] (8 chars)
+		; (Copy to buffer as Open File needs ASCIZ)
+
+		push	di
+
+		mov	cx, 8
+		add	di, 10
+		lds	si, [cs:read_buf]
+.nextc:		mov	al, [es:di]
+		cmp	al, ' '
+		je	.terminate
+		mov	[si], al
+		inc	si
+		inc	di
+		loop	.nextc
+.terminate:	mov	byte [si], 0
+
+
+		mov	ax, 0x1226		; Open File
+		mov	cl, 0x01		; Write only
+		lds	dx, [cs:read_buf]	; Points to ASCIZ device name
+		int	0x2F
+
+		pop	di
+		pop	si
+		pop	ds
+
+		jnc	.call_ioctl
+		mov	word [cs:result], 0x41
+		jmp	.nextdev		; Failed to open
+
+		;INT 2F U - DOS 3.3+ internal - IOCTL
+		;        AX = 122Bh
+		;        BP = 44xxh (BP=440Ch Generic Character Device Request)
+		;        BX = device handle
+		;        CH = category code (see #01545)
+		;        CL = function number (see #01546)
+		;        DS:DX -> parameter block (see #01549)
+		;        SI = parameter to pass to driver
+		;                 (European MS-DOS 4.0, OS/2 comp box)
+		;        DI = parameter to pass to driver
+		;                 (European MS-DOS 4.0, OS/2 comp box)
+		;Return: CF set on error
+		;            AX = error code (see #01680 at AH=59h/BX=0000h)
+		;        CF clear if successful
+		;
+		;(Table 01545)
+		;Values for IOCTL category code:
+		; 00h    unknown (DOS 3.3+)
+		;
+		;(Table 01546)
+		;Values for generic character IOCTL function:
+		; 4Ah    select code page (see #01549)
+		;
+		;(Table 01549)
+		;Format of parameter block for functions 4Ah and 6Ah:
+		;Offset  Size    Description
+		; 00h    WORD    length of data
+		; 02h    WORD    code page ID (see #01757 at INT 21/AX=6602h)
+		; 04h 2N BYTEs   DCBS (double byte char set) lead byte range
+		;                  start/end for each of N ranges (DOS 4.0)
+		;        WORD    0000h  end of data (DOS 4.0)
+		; 
+
+
+.call_ioctl:	push	bp
+		mov	bx, ax
+		mov	cx, 0x004A	; Select Code Page
+		mov	bp, 0x440C	; Generic IOCTL
+		mov	ax, 0x122B
+		lds	dx, [cs:read_buf]
+		add	dx, 0x10
+		int	0x2F
+		pop	bp
+
+		jnc	.closedev
+		cmp	ax, 0x01	; "function number invalid"
+		je	.closedev
+
+		; If device reports "unknown command", just ignore it.
+		; Any other error is relevant. We need to check the extended
+		; error information.
+		;
+		mov	ax, 0x122D	; Get Extended Error Code
+		int	0x2F
+		cmp	ax, 0x16	; "unknown command given to driver"
+		je	.closedev
+
+		; Any other error, set error code
+		;
+		mov	word [cs:result], 0x41
+
+		; In any case, close device and get next one
+		;
+.closedev:	mov	ax, 0x1227		; Close File 
+		int	0x2F
+		jnc	.nextdev
+		mov	word [cs:result], 0x41
+
+.nextdev:	cmp	word [es:di], 0xFFFF	; Last?
+		je	.ret
+		les	di, [es:di]		; Load next device
+		jmp	.chkchar	
+		
+
+.ret:		mov	ax, [cs:result]
+		pop	bx
+		pop	cx
+		pop	dx
+		pop	si
+		pop	ds
+		pop	di
+		pop	es
 		ret
 
 
@@ -1173,13 +1444,18 @@ fake_int2f:	cmp	ax, 0x1400
 		or	byte [cs:invalid], 1
 		jmp	chain		; Invalid Kernel NLS version
 .testid:	cmp	cx, NLS_FREEDOS_NLSFUNC_ID
-		je	.chkpath
+		je	.saveptr
 		or	byte [cs:invalid], 1
 		jmp	chain		; Invalid magic number
 
-		; First, check if kernel has a path
+		; First, save pointer to kernel NLS info
 		;
-.chkpath:	push	cx
+.saveptr:	mov	[cs:kernel_nls], si
+		mov	[cs:kernel_nls+2], ds
+
+		; Check if kernel has a path
+		;
+		push	cx
 		mov	bx, [si]
 		mov	cx, [si+2]
 		or	bx, bx
@@ -1270,7 +1546,15 @@ fake_int2f:	cmp	ax, 0x1400
 ;;;
 
 
-start:		; Check if we are installed
+start:		push	cs
+		pop	ds
+		; Say Hello!
+		;
+		mov	dx, Hello
+		mov	ah, 0x09
+		int	0x21
+
+		; Check if we are installed
 		;
 		mov	bx, NLS_FREEDOS_NLSFUNC_VERSION
 		mov	cx, NLS_FREEDOS_NLSFUNC_ID
@@ -1432,7 +1716,7 @@ findfile:	mov	ax, 0x4E00
 		jnc	testfile
 
 		lds	si, [cs:country_file]
-		call	print
+		call	printz
 		mov	si, ErrNotFound
 		mov	byte [cs:errlevel], ERR_NOTFOUND
 		jmp	quit
@@ -1444,7 +1728,7 @@ testfile:	mov	ax, 0x3D00	; Open file read-only
 		jnc	chkfileid
 
 		lds	si, [cs:country_file]
-		call	print
+		call	printz
 		mov	si, ErrFileOpen
 		mov	byte [cs:errlevel], ERR_FILEOPEN
 		jmp	quit
@@ -1457,7 +1741,7 @@ chkfileid:	mov	bx, ax		; Read from file
 		jnc	cmpidstr
 
 		lds	si, [cs:country_file]
-		call	print
+		call	printz
 		mov	si, ErrFileRead
 		mov	byte [cs:errlevel], ERR_FILEREAD
 		jmp	quit
@@ -1474,7 +1758,7 @@ cmpidstr:	mov	ah, 0x3E		; Close file
 		jcxz	allocmem
 
 		lds	si, [cs:country_file]
-		call	print
+		call	printz
 		mov	si, ErrFileInvld
 		mov	byte [cs:errlevel], ERR_FILEINVLD
 		jmp	quit
@@ -1517,19 +1801,26 @@ setnlspkg:	mov	word [cs:nls_pkg], 0
 		;; In some cases, they load just the country specific
 		;; information; in others, they ignore LCASE and DBCS tables.
 		;; To ensure that all the info is loaded, we force a
-		;; DosGetCodepage() + DosSetCodepage()
+		;; a package load
+		;;
 
-		; Call DosGetCodepage() + DosSetCodepage()
+		les	si, [cs:kernel_nls]	; Ptr to kernel nls info
+		les	si, [es:si+8]		; Ptr to current pkg
+		mov	bx, [es:si+4]		; Save country
+		mov	word [es:si+4], 0xFFFE	; Set invalid country
+		mov	ax, 0x38FF		; Set Country Code (in BX)
+		mov	dx, 0xFFFF
+		int	0x21
+		jnc	.load_success
+
+		; If failed, restore country code
 		;
-		mov	ax, 0x6601
-		int	0x21
-		mov	ax, 0x6602
-		int	0x21
+		mov	[es:si+4], bx
 
 		; Point read buffer to PSP (already allocated memory
 		; will be freed on exit)
 		;
-		mov	ax, cs
+.load_success:	mov	ax, cs
 		mov	[cs:read_buf+2], ax
 		mov	word [cs:read_buf], 0
 		
@@ -1557,7 +1848,7 @@ setnlspkg:	mov	word [cs:nls_pkg], 0
 		;
 quit:		push	cs
 		pop	ds
-		call	print
+		call	printz
 		mov	al, [cs:errlevel]	; Set errorlevel
 		mov	ah, 0x4C		; Exit
 		int	0x21
@@ -1620,7 +1911,7 @@ link_state	db	0, 0
 		ret
 
 
-print:		mov	dl, [si]
+printz:		mov	dl, [si]
                 or	dl, dl
                 jz	.ret
                                                                                 
@@ -1628,13 +1919,14 @@ print:		mov	dl, [si]
                 mov	ah, 0x02
                 int	0x21
                                                                                 
-                jmp	print
+                jmp	printz
                                                                                 
 .ret:		ret
 		
 SysNlsMark	db	"SC NLS P"
-ErrInstalled	db	"FD NLSFUNC already installed", 13, 10, 0
-ErrNotAllowed	db	"FD NLSFUNC not allowed to install", 13, 10, 0
+Hello		db	"FreeDOS NLSFUNC ver. 0.3", 13, 10, '$'
+ErrInstalled	db	"NLSFUNC is already installed", 13, 10, 0
+ErrNotAllowed	db	"NLSFUNC is not allowed to install", 13, 10, 0
 ErrKernel	db	"NLSFUNC: Incompatible kernel version", 13, 10, 0
 ErrNotFound	db	": File not found", 13, 10, 0
 ErrFileOpen	db	": Error opening file", 13, 10, 0
