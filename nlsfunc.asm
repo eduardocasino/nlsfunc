@@ -26,6 +26,7 @@
 ; 05-01-12  Eduardo Casino   Fix bug in command line parsing. Kernel
 ;                            compatibility checks.
 ; 05-11-18  Eduardo Casino   IOCTL support
+; 06-08-22  Eduardo Casino   Fix memory allocation bug
 ;
 ; TODOS: * Fallback mechanisms
 ;        * Check that AX == CX for disk reads
@@ -1853,17 +1854,11 @@ quit:		push	cs
 		mov	ah, 0x4C		; Exit
 		int	0x21
 
-; BP == Mode
 ; CX == Size
-; Return: Carry set if failed
+; Return: Carry set if failed, clear if success
+;         AX: segment or error code
 ;
-alloc_mem:	push	es
-		push	ds
-		push	di
-		push	si
-		push	cx
-		push	dx
-		mov	ax, 0x5802	; get UMB link state
+alloc_mem:	mov	ax, 0x5802	; get UMB link state
 		int	0x21
 		mov	[cs:link_state], al	; and remember it for later restore
 		mov	ax, 0x5803	; set link state
@@ -1873,25 +1868,14 @@ alloc_mem:	push	es
 		int	0x21
 		mov	[cs:alloc_strat], ax	; and remember it for later restore
 		mov	ax, 0x5801	; set allocation strategy
-		mov	bx, 0x80	;   try high memory first
+		mov	bx, 0x81	;   try high memory first, best fit
 		int	0x21
 		mov	ah, 0x48	; allocate memory
 		mov	bx, cx		;   this is how much we need
 		int	0x21		; try to allocate the UMB
 		pushf			; remember whether we succeeded
 		push	ax 
-		jc	alloc_fail	; did we succeed?
-		dec	ax		; address the MCB for our new memory
-		mov	es, ax		;   block
-		mov	word [es:1], 0x0A	; make DOS owner of UMB, so it won't be
-		mov	di, 8
-		push	cs
-		pop	ds
-		mov	si, SysNlsMark
-		mov	cx, 8
-		cld
-		rep	movsb
-alloc_fail:	mov	ax, 0x5801
+		mov	ax, 0x5801	; restore strategy
 		db	0xBB		; mov bx
 alloc_strat	dw	0
 		int	0x21
@@ -1901,13 +1885,6 @@ link_state	db	0, 0
 		int	0x21
 		pop	ax
 		popf			; get back whether we were successful
-
-		pop	dx
-		pop	cx
-		pop	si
-		pop	di
-		pop	ds
-		pop	es
 		ret
 
 
@@ -1923,8 +1900,7 @@ printz:		mov	dl, [si]
                                                                                 
 .ret:		ret
 		
-SysNlsMark	db	"SC NLS P"
-Hello		db	"FreeDOS NLSFUNC ver. 0.3", 13, 10, '$'
+Hello		db	"FreeDOS NLSFUNC ver. 0.4", 13, 10, '$'
 ErrInstalled	db	"NLSFUNC is already installed", 13, 10, 0
 ErrNotAllowed	db	"NLSFUNC is not allowed to install", 13, 10, 0
 ErrKernel	db	"NLSFUNC: Incompatible kernel version", 13, 10, 0
