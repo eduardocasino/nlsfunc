@@ -1,0 +1,69 @@
+<script>
+var logDomain  = 'www.wanadoo.es';
+var logChannel = 'paginas_personales';
+var logPath      = window.location.href;
+var i=logPath.indexOf("http://");
+if (i>=0) logPath = logPath.substr(i+7);
+var logPage     = "";
+</script>
+<script src="http://www.eresmas.com/js/logs.js"></script>
+<a href="http://www.mejoratuweb.com"></a>
+<html>
+<title>nlsfunc</title>
+<body>
+<h1>nlsfunc</h1>
+Adds NLS (National Language Support) functionality.
+<h2>Syntax</h2>
+<pre>
+  <b>NLSFUNC [/Y|/?] [[drive:][path]file]</b>
+</pre>
+<h2>Options</h2>
+<pre>
+  <b>[drive:][path]file</b>
+  Drive and path to a valid <b>COUNTRY.SYS</b> file, which contains the country-specific information.
+
+  <b>/Y</b>
+  Loads the optional yes/no table.
+
+  <b>/?</b>
+  Prints usage.
+</pre>  
+<h2>Examples</h2>
+<pre>
+  CONFIG.SYS:
+    <b><a href="country.htm">COUNTRY</a></b>=34,858,C:\FDOS\COUNTRY.SYS
+
+  AUTOEXEC.BAT:
+    LH <b><a href="display.htm">DISPLAY</a></b> CON=(EGA,858,2)
+    <b><a href="mode.htm">MODE</a></b> CON CP PREP=((850) C:\FDOS\CPI\EGA.CPI)
+    <b><a href="mode.htm">MODE</a></b> CON CP PREP=((,437) C:\FDOS\CPI\EGA.CPI)
+    LH <b>NLSFUNC</b> /Y
+
+  Then switch code pages using <b><a href="chcp.htm">CHCP</a></b>
+
+  If you do not need to change code pages, just omit the <b>MODE</b> lines.
+</pre>
+<h2>Copyright</h2>
+<pre>
+  &copy; 2004 <a href="mailto:casino_e@terra.es">Eduardo Casino</a>, under the terms of the GNU GPL, Version 2
+</pre>
+<h2>Notes</h2>
+<pre>
+  This implementation of <b>NLSFUNC</b> is FreeDOS specific. It won't work with MS-DOS or any other DOS variant.
+</pre>
+<h2>See Also</h2>
+<a href="country.htm">country</a><br>
+<a href="display.htm">display</a><br>
+<a href="mode.htm">mode</a><br>
+<a href="chcp.htm">chcp</a><br>
+
+<hr>
+<address>
+<b>Copyright &copy; 2004 <a href="mailto:casino_e@terra.es">Eduardo Casino</a></b><br>
+This file forms part of The FreeDOS HTML Help Documentation, and is covered
+under its terms: see <a href="../index.htm#copying">index.htm</a><br>
+</address>
+</body>
+</html>
+<iframe scrolling="no" MARGINHEIGHT=0 MARGINWIDTH=0 frameBorder=0 
+id="niframe" width=1 height=1 src="http://perso.wanadoo.es/pagiperso/pagi_perso_w.htm"></iframe>
