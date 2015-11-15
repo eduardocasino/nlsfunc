@@ -20,6 +20,8 @@
 ;       to Ralf!
 ;
 ; 04-12-05  Eduardo Casino   First version
+; 05-01-12  Eduardo Casino   Fix bug in command line parsing. Kernel
+;                            compatibility checks.
 ;
 ; TODOS: * Fallback mechanisms
 ;        * Check that AX == CX for disk reads
@@ -1146,24 +1148,38 @@ get_nls_pkg:	mov	bx, ax			; Look for table
 end_resident:
 ; ================== END OF RESIDENT CODE ================================
 
+ERR_SUCCESS	equ	0
+ERR_INSTALLED	equ	ERR_SUCCESS
+ERR_NOTALLOWED	equ	1
+ERR_KERNEL	equ	1
+ERR_NOTFOUND	equ	1
+ERR_FILEOPEN	equ	1
+ERR_FILEREAD	equ	1
+ERR_FILEINVLD	equ	1
+ERR_INVLDSWITCH	equ	1
+ERR_MEMORY	equ	1
+ERR_USAGE	equ	1
+
 filename	times 0x100 db 0
 fname_len	dw	0
+invalid		db	0		; Invalid kernel flag
+errlevel	db	ERR_SUCCESS
 
 fake_int2f:	cmp	ax, 0x1400
 		je	.i2f1400
 		jmp	chain
 .i2f1400:	cmp	bx, NLS_FREEDOS_NLSFUNC_VERSION
 		je	.testid
+		or	byte [cs:invalid], 1
 		jmp	chain		; Invalid Kernel NLS version
 .testid:	cmp	cx, NLS_FREEDOS_NLSFUNC_ID
 		je	.chkpath
+		or	byte [cs:invalid], 1
 		jmp	chain		; Invalid magic number
-		mov	bx, cx		; Return magic number in BX
 
 		; First, check if kernel has a path
 		;
-.chkpath:	push	bx
-		push	cx
+.chkpath:	push	cx
 		mov	bx, [si]
 		mov	cx, [si+2]
 		or	bx, bx
@@ -1243,8 +1259,8 @@ fake_int2f:	cmp	ax, 0x1400
 		pop	di
 		pop	dx
 		pop	cx
-		pop	bx
 
+		mov	bx, cx		; Return magic number in BX
 		mov	al, 0x01	; Not OK to install
 		jmp	i2f14_ret2	; Set carry and return
 
@@ -1267,11 +1283,13 @@ start:		; Check if we are installed
 		je	installed?
 		
 		mov	si, ErrNotAllowed
+		mov	byte [cs:errlevel], ERR_NOTALLOWED
 		jmp	quit
 
 installed?:	cmp	bx, NLS_FREEDOS_NLSFUNC_ID
 		jne	install
 		mov	si, ErrInstalled
+		mov	byte [cs:errlevel], ERR_INSTALLED
 		jmp	quit
 
 install:	; Set a temporary read buffer
@@ -1282,6 +1300,7 @@ install:	; Set a temporary read buffer
 		jnc	settmpbuf
 
 		mov	si, ErrMemory
+		mov	byte [cs:errlevel], ERR_MEMORY
 		jmp	quit
 
 settmpbuf:	mov	word [cs:read_buf], 0
@@ -1295,71 +1314,8 @@ settmpbuf:	mov	word [cs:read_buf], 0
 		mov     [cs:old_int2f], bx
 		mov     [cs:old_int2f+2], ax
 
-		; Get filename from command line
-		;
-parse:		mov	si, 0x80
-		xor	cx, cx
-		mov	cl, [cs:si]
-		inc	si
-		cld
-.loop1:		mov	al, [cs:si]
-		cmp	al, 0x0D
-		je	fromkernel
-		call	isblank
-		jne	.nbfound
-		inc	si
-		loop	.loop1
-.nbfound:	cmp	al, '/'		; switch?
-		jne	.filefound
-		inc	si
-		dec	cx
-		mov	al, [cs:si]
-		cmp	al, '?'
-		je	.usage
-		cmp	al, 'y'
-		je	.loadyn
-		cmp	al, 'Y'
-		je	.loadyn
-.invalid:	mov	[cs:ErrInvldSwitch2], al
-		mov	si, ErrInvldSwitch
-		jmp	quit
-.usage:		mov	si, Usage
-		jmp	quit
-.loadyn:	or	word [cs:nls_subfcts], NLS_LOADYESNO
-		inc	si
-		dec	cx
-		loop	.loop1
-
-.filefound:	push	cx
-		mov	di, filename
-.loop2:		mov	al,[cs:si]
-		mov	[cs:di], al
-		call	isblank
-		je	.end
-		inc	si
-		inc	di
-		loop	.loop2
-.end:		mov	byte [cs:di], 0
-		pop	ax
-		sub	ax, cx		; Length of filename
-		inc	ax		; plus '\0'
-		mov	[cs:fname_len], ax
-		mov	word [cs:country_file], filename
-		mov	ax, cs
-		mov	[cs:country_file+2], ax
-		jmp	findfile
-
-isblank:	cmp	al, ' '
-		je	.ret
-		cmp	al, 0x09
-		je	.ret
-		cmp	al, 0x0A
-		je	.ret
-		cmp	al, 0x0D
-.ret:		ret
-
 		; Install fake NLSFUNC handler and call int2138 with invalid
-		; country to get filename from kernel
+		; country to get default parameters from kernel
 		;
 fromkernel:	mov     ax, 0x252F
 		push	cs
@@ -1382,6 +1338,91 @@ fromkernel:	mov     ax, 0x252F
                 int     0x21
 		pop	ds
 
+		; Check if this is a compatible kernel
+		;
+		test	byte [cs:invalid], 1
+		jz	parse
+
+		mov	si, ErrKernel
+		mov	byte [cs:errlevel], ERR_KERNEL
+		jmp	quit
+		
+
+		; Parse command line
+		;
+parse:		mov	si, 0x80
+		xor	cx, cx
+		mov	cl, [cs:si]
+		inc	si
+		cld
+.loop1:		mov	al, [cs:si]
+		cmp	al, 0x0D
+		jne	.cont
+		jmp	findfile
+.cont:		call	isblank
+		jne	.nbfound
+		inc	si
+		loop	.loop1
+		jmp	findfile
+.nbfound:	cmp	al, '/'		; switch?
+		je	.isswitch
+		call	get_filename
+.nextloop:	loop	.loop1
+		jmp	findfile
+.isswitch:	call	parse_switch
+		jmp	.nextloop
+
+parse_switch:	inc	si
+		dec	cx
+		mov	al, [cs:si]
+		cmp	al, '?'
+		je	.usage
+		cmp	al, 'y'
+		je	.loadyn
+		cmp	al, 'Y'
+		je	.loadyn
+.invalid:	mov	[cs:ErrInvldSwitch2], al
+		mov	si, ErrInvldSwitch
+		mov	byte [cs:errlevel], ERR_INVLDSWITCH
+		jmp	quit
+.usage:		mov	si, Usage
+		mov	byte [cs:errlevel], ERR_USAGE
+		jmp	quit
+.loadyn:	or	word [cs:nls_subfcts], NLS_LOADYESNO
+		inc	si
+		ret
+
+get_filename:	push	cx
+		mov	di, filename
+.loop2:		mov	al,[cs:si]
+		mov	[cs:di], al
+		call	isblank2
+		je	.end
+		inc	si
+		inc	di
+		loop	.loop2
+.end:		mov	byte [cs:di], 0
+		pop	ax
+		sub	ax, cx		; Length of filename
+		inc	ax		; plus '\0'
+		mov	[cs:fname_len], ax
+		mov	word [cs:country_file], filename
+		mov	ax, cs
+		mov	[cs:country_file+2], ax
+		ret
+
+isblank2:	cmp	al, '/'
+		je	isblank.ret
+isblank:	cmp	al, ' '
+		je	.ret
+		cmp	al, 0x09
+		je	.ret
+		cmp	al, 0x0A
+		je	.ret
+		cmp	al, 0x0D
+.ret:		ret
+
+
 		; Test for existance and fail to install if not
 		;
 findfile:	mov	ax, 0x4E00
@@ -1393,6 +1434,7 @@ findfile:	mov	ax, 0x4E00
 		lds	si, [cs:country_file]
 		call	print
 		mov	si, ErrNotFound
+		mov	byte [cs:errlevel], ERR_NOTFOUND
 		jmp	quit
 
 		; Check if it is a valid file
@@ -1404,6 +1446,7 @@ testfile:	mov	ax, 0x3D00	; Open file read-only
 		lds	si, [cs:country_file]
 		call	print
 		mov	si, ErrFileOpen
+		mov	byte [cs:errlevel], ERR_FILEOPEN
 		jmp	quit
 
 chkfileid:	mov	bx, ax		; Read from file
@@ -1416,6 +1459,7 @@ chkfileid:	mov	bx, ax		; Read from file
 		lds	si, [cs:country_file]
 		call	print
 		mov	si, ErrFileRead
+		mov	byte [cs:errlevel], ERR_FILEREAD
 		jmp	quit
 
 cmpidstr:	mov	ah, 0x3E		; Close file
@@ -1432,6 +1476,7 @@ cmpidstr:	mov	ah, 0x3E		; Close file
 		lds	si, [cs:country_file]
 		call	print
 		mov	si, ErrFileInvld
+		mov	byte [cs:errlevel], ERR_FILEINVLD
 		jmp	quit
 
 		; Allocate memory and mark it as owned by DOS
@@ -1448,6 +1493,7 @@ allocmem:	mov	ax, NLS_MAX_PKGSIZE
 		call	alloc_mem
 		jnc	setnlspkg
 		mov	si, ErrMemory
+		mov	byte [cs:errlevel], ERR_MEMORY
 		jmp	quit
 setnlspkg:	mov	word [cs:nls_pkg], 0
 		mov	[cs:nls_pkg+2], ax
@@ -1512,7 +1558,8 @@ setnlspkg:	mov	word [cs:nls_pkg], 0
 quit:		push	cs
 		pop	ds
 		call	print
-		mov	ax, 0x4C01	; Exit, errorlevel 1
+		mov	al, [cs:errlevel]	; Set errorlevel
+		mov	ah, 0x4C		; Exit
 		int	0x21
 
 ; BP == Mode
@@ -1588,6 +1635,7 @@ print:		mov	dl, [si]
 SysNlsMark	db	"SC NLS P"
 ErrInstalled	db	"FD NLSFUNC already installed", 13, 10, 0
 ErrNotAllowed	db	"FD NLSFUNC not allowed to install", 13, 10, 0
+ErrKernel	db	"NLSFUNC: Incompatible kernel version", 13, 10, 0
 ErrNotFound	db	": File not found", 13, 10, 0
 ErrFileOpen	db	": Error opening file", 13, 10, 0
 ErrFileRead	db	": Error reading from file", 13, 10, 0
