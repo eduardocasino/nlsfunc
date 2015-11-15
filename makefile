@@ -8,7 +8,7 @@ INSTDIR=../../bin
 all: nlsfunc.exe
 
 install: all
-	$(UPX) --8086 -f -o $(INSTDIR)/nlsfunc.exe nlsfunc.exe
+	$(UPX) --8086 -9 -f -o $(INSTDIR)/nlsfunc.exe nlsfunc.exe
 	
 clean:
 	rm -f nlsfunc.exe
