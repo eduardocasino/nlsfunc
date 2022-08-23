@@ -2,11 +2,11 @@
 Adds NLS (National Language Support) functionality.
 
 ## Syntax
-`NLSFUNC [/Y|/?] [[drive:][path]file]`
+<pre>NLSFUNC [/Y|/?] [[drive:][path]file]</pre>
 
 ## Options
 <pre>[drive:][path]file
-	Drive and path to a valid COUNTRY.SYS file, which contains the country-specific information.`
+	Drive and path to a valid COUNTRY.SYS file, which contains the country-specific information.
 
 /Y
 Loads the optional yes/no table.
